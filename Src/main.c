@@ -249,65 +249,44 @@ int main(void)
                 // Tegangan belum memenuhi setpoint ==> CC Charging
                 if(voltage_V < voltage_syarat[accu_class]) {
                     if(charge_mode!=CC) {
-                        if(HAL_GetTick() - prev_mode_time > 10000) {
-							//*******************************************
-							//Masuk Mode CC baru karena mode sebelumnya sudah berjalan > 5 detik
-							//*******************************************
-                            //reset_error();
-                            charge_mode=CC;
-                            prev_time=HAL_GetTick();
-                            prev_mode_time=HAL_GetTick();
-                            //Ierr=7;
+						//reset_error();
+						charge_mode=CC;
+						prev_time=HAL_GetTick();
+						prev_mode_time=HAL_GetTick();
+						//Ierr=7;
 
-                            setpoint=current_setpoint[accu_class];
-                            KP_now=KP[accu_class][CC];
-                            KI_now=KI[accu_class][CC];
-                            KD_now=KD[accu_class][CC];
+						setpoint=current_setpoint[accu_class];
+						KP_now=KP[accu_class][CC];
+						KI_now=KI[accu_class][CC];
+						KD_now=KD[accu_class][CC];
 
-                            // Start sistem
-                            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_SET);
-							output = PID(current_A);
-							pwmval=output;
-							drive_sepic(output);
-                        }
+						// Start sistem
+						HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_SET);
                     }
-                    else {
-                        output = PID(current_A);
-                        pwmval=output;
-                        drive_sepic(output);
-                    }
+					output = PID(current_A);
+					pwmval=output;
+					drive_sepic(output);
                 }
                 // Arus masih besar (diatas 10% dari setpoint) ==> CV Charging
                 else if(current_A > current_setpoint[accu_class]*0.1) {
                     if(charge_mode!=CV) {
-                        if(HAL_GetTick() - prev_mode_time > 10000) {
-							//*******************************************
-							//Masuk Mode CV baru karena mode sebelumnya sudah berjalan > 5 detik
-							//*******************************************
-                            //reset_error();
-                            prev_time=HAL_GetTick();
-                            prev_mode_time=HAL_GetTick();
-                            charge_mode=CV;
-                            //Ierr=13;
+						//reset_error();
+						prev_time=HAL_GetTick();
+						prev_mode_time=HAL_GetTick();
+						charge_mode=CV;
+						//Ierr=13;
 
-                            setpoint=voltage_setpoint[accu_class];
-                            KP_now=KP[accu_class][CV];
-                            KI_now=KI[accu_class][CV];
-                            KD_now=KD[accu_class][CV];
+						setpoint=voltage_setpoint[accu_class];
+						KP_now=KP[accu_class][CV];
+						KI_now=KI[accu_class][CV];
+						KD_now=KD[accu_class][CV];
 
-                            // Start sistem
-                            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_SET);
-							output = PID(current_A);
-							pwmval=output;
-							drive_sepic(output);
-                        }
+						// Start sistem
+						HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_SET);
                     }
-					//Mode sebelumnya masih sama (CV)
-                    else {
-                        output = PID(voltage_V);
-                        pwmval=output;
-                        drive_sepic(output);
-                    }
+					output = PID(voltage_V);
+					pwmval=output;
+					drive_sepic(output);
                 }
                 // Arus sudah kecil
                 else {
