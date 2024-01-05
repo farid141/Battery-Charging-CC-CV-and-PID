@@ -22,9 +22,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "string.h"
-#include "lcd_character.h"
+#include "i2c-lcd.h"
 #include <math.h>
-#include <stdlib.h>
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -50,56 +50,62 @@
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
 
+I2C_HandleTypeDef hi2c1;
+
 TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
 float current_A, current_ADC, voltage_V, voltage_ADC;
-int accu_class= -1, charge_mode;
+int accu_class, charge_mode;
 double setpoint;
 
 //PID Params
-//indeks 0 = low, 1=med, 2=high
+//format:
+//			CC	| CV
+//0=low,
+//1=med,
+//2=high
 double KP_now, KI_now, KD_now;
-double KP[3][2]= {
-    {0, 0}, //CC, CV
-    {0, 0},
-    {0, 0}
+const double KP[3][2]= {
+    { 0.0065, 0.0065}, //CC, CV
+    {0.0007, 0.00092},
+    {0.0005, 0.0078}
 };
-double KI[3][2]= {
-    {0, 0},
-    {0, 0},
-    {0, 0}
+const double KI[3][2]= {
+    { 0.03125,  0.03125},
+    { 0.0375, 0.05},
+    {0.05625, 0.075}
 };
-double KD[3][2]= {
+const double KD[3][2]= {
     {0, 0},
     {0, 0},
     {0, 0}
 };
 
-double Lerr = 0.0, Derr = 0.0, Ierr = 0.0, error=0.0, output = 0.0;
-unsigned long prev_time, last_lcd_time;
+double Lerr = 0.0, Derr = 0.0, Ierr = 0.0, error=0, output = 0.0;
+unsigned long prev_time, prev_lcd_time, prev_mode_time;
 
 /* INISISALISASI USART */
 unsigned int len;
-char buffer[100];
+int8_t buffer[100];
 
 //Range identifikasi kelas
-double voltage_range[3][2]= {
+const double voltage_range[3][2]= {
     {3.75, 4.37},	//low
     {5.75, 6.37},	//med
     {11.51, 12.73}	//high
 };
 
-double voltage_setpoint[3]= {
-    4.8,
+const double voltage_setpoint[3]= {
+    4.7,
     7,
     13.8
 };
 
-double current_setpoint[3]= {
-    0.6,
+const double current_setpoint[3]= {
+    0.67,
     0.7,
     0.72
 };
@@ -112,17 +118,21 @@ static void MX_GPIO_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 float getADCAvg(uint32_t channel, int sample, ADC_HandleTypeDef* hadc);
-float PID();
+double PID(double input);
 void reset_error();
 void baca_sensor();
 void print_lcd();
+void drive_sepic(float percent);
+void data_logger();
+float adcToVolt(float adc);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+float pwmval=0;
 /* USER CODE END 0 */
 
 /**
@@ -156,28 +166,66 @@ int main(void)
     MX_ADC1_Init();
     MX_TIM4_Init();
     MX_USART3_UART_Init();
+    MX_I2C1_Init();
     /* USER CODE BEGIN 2 */
     //start timer 4 (pwm)
     HAL_TIM_Base_Start(&htim4);
     HAL_TIM_PWM_Start(&htim4,TIM_CHANNEL_1);
-    TIM4->CCR1 = 0;
+
+    //LCD
+    HAL_Delay(50);
+    lcd_init();
+    HAL_Delay(50);
+
+
+    lcd_send_cmd(0x80 | 0x00); //  lcd_setCursor(0,0);
+    len = snprintf((char *)buffer, 50, "test");
+    lcd_send_string((char *)buffer);
+
+    lcd_send_cmd(0x80 | 0x40); //  lcd_setCursor(0,1)
+    len = snprintf((char *)buffer, 50, "test");
+    lcd_send_string((char *)buffer);
+    HAL_Delay(2000);
+
+    //start pwm
+    drive_sepic(0);
+    accu_class=-1;
 
     //stop sistem
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, GPIO_PIN_RESET);
-	charge_mode = OFF;
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);
+    charge_mode = OFF;
+
+    int len = snprintf((char*)buffer, 100,"CLEARDATA\r\nLABEL,TIME, Started Time,Data Register1, data2\r\nRESETTIMER");
+	
+	prev_lcd_time = HAL_GetTick();
+	prev_mode_time = HAL_GetTick();
+
+    //HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_SET);//NYALA
+
     /* USER CODE END 2 */
 
     /* Infinite loop */
     /* USER CODE BEGIN WHILE */
     while (1)
     {
+//		pwmval+=0.1;
+//		drive_sepic(pwmval);
         baca_sensor();
         print_lcd();
 
         /* IDENTIFIKASI JENIS AKI*/
-        if(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3)==GPIO_PIN_SET) {
+        if(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3)==GPIO_PIN_RESET) {
+//			pwmval+=0.1;
+//			drive_sepic(pwmval);
+//			
             // Stop sistem
-            HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);
+            pwmval=0;
+            drive_sepic(pwmval);
+            HAL_Delay(5000);
+            charge_mode=OFF;
+            baca_sensor();
+			reset_error();
 
             if(voltage_V > voltage_range[0][MIN] && voltage_V < voltage_range[0][MAX]) accu_class=0;
             else if(voltage_V > voltage_range[1][MIN] && voltage_V < voltage_range[1][MAX]) accu_class=1;
@@ -187,44 +235,66 @@ int main(void)
 
         /* CHARGING AKI */
         else {
-            /* JENIS AKI TERIDENTIFIKASI */
+            /* JENIS AKI TELAH TERIDENTIFIKASI */
             if (accu_class != -1)
             {
                 /* TENTUKAN MODE CHARGING*/
-                // Tegangan belum memenuhi setpoint
+                // Tegangan belum memenuhi setpoint ==>> CC Charging
                 if(voltage_V < voltage_setpoint[accu_class]) {
-					if(charge_mode!=CV) reset_error();
-					
-                    charge_mode=CC;
-                    setpoint=current_setpoint[0];
-                    KP_now=KP[accu_class][CC];
-                    KI_now=KI[accu_class][CC];
-                    KD_now=KD[accu_class][CC];
-					
-					// Start sistem
-					prev_time=HAL_GetTick();
-					HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, GPIO_PIN_SET);
-					PID(voltage_V);
+                    if(charge_mode!=CC) {
+						if(HAL_GetTick() - prev_mode_time > 5000){
+							//reset_error();
+							charge_mode=CC;
+							prev_time=HAL_GetTick();
+							prev_mode_time=HAL_GetTick();
+							//Ierr=7;
+							
+							setpoint=current_setpoint[accu_class];
+							KP_now=KP[accu_class][CC];
+							KI_now=KI[accu_class][CC];
+							KD_now=KD[accu_class][CC];
+
+							// Start sistem
+							HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_SET);
+						}
+                    }
+					else{
+						output = PID(current_A);
+						pwmval=output;
+						drive_sepic(output);
+					}
                 }
-                // Arus masih besar (diatas 10% dari setpoint)
-                else if(current_A > current_setpoint[0]*0.1) {
-					if(charge_mode!=CV) reset_error();
-					
-                    charge_mode=CV;
-                    setpoint=voltage_setpoint[accu_class];
-                    KP_now=KP[accu_class][CC];
-                    KI_now=KI[accu_class][CC];
-                    KD_now=KD[accu_class][CC];
-					
-					// Start sistem
-					prev_time=HAL_GetTick();
-					HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, GPIO_PIN_SET);
+                // Arus masih besar (diatas 10% dari setpoint) ==>> CV Charging
+                else if(current_A > current_setpoint[accu_class]*0.1) {
+                    if(charge_mode!=CV) {
+						if(HAL_GetTick() - prev_mode_time > 5000){
+							//reset_error();
+							prev_time=HAL_GetTick();
+							prev_mode_time=HAL_GetTick();
+							charge_mode=CV;
+							//Ierr=13;
+							
+							setpoint=voltage_setpoint[accu_class];
+							KP_now=KP[accu_class][CV];
+							KI_now=KI[accu_class][CV];
+							KD_now=KD[accu_class][CV];
+
+							// Start sistem
+							HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_SET);
+						}
+                    }
+					else{
+						output = PID(voltage_V);
+						pwmval=output;
+						drive_sepic(output);
+					}
                 }
                 // Arus sudah kecil
-                else {
+                else if((charge_mode!=OFF)) {
                     // Stop sistem
-                    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, GPIO_PIN_RESET);
-                    charge_mode=-1;
+                    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);
+                    charge_mode=OFF;
+					HAL_Delay(5000);
                 }
             }
         }
@@ -335,6 +405,40 @@ static void MX_ADC1_Init(void)
 }
 
 /**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+    /* USER CODE BEGIN I2C1_Init 0 */
+
+    /* USER CODE END I2C1_Init 0 */
+
+    /* USER CODE BEGIN I2C1_Init 1 */
+
+    /* USER CODE END I2C1_Init 1 */
+    hi2c1.Instance = I2C1;
+    hi2c1.Init.ClockSpeed = 100000;
+    hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+    hi2c1.Init.OwnAddress1 = 0;
+    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2 = 0;
+    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+    if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+    /* USER CODE BEGIN I2C1_Init 2 */
+
+    /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
   * @brief TIM4 Initialization Function
   * @param None
   * @retval None
@@ -428,22 +532,33 @@ static void MX_GPIO_Init(void)
     /* USER CODE END MX_GPIO_Init_1 */
 
     /* GPIO Ports Clock Enable */
+    __HAL_RCC_GPIOE_CLK_ENABLE();
     __HAL_RCC_GPIOH_CLK_ENABLE();
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOC_CLK_ENABLE();
-    __HAL_RCC_GPIOE_CLK_ENABLE();
     __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    /*Configure GPIO pin Output Level */
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12
+                      |GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_0|GPIO_PIN_1, GPIO_PIN_RESET);
 
     /*Configure GPIO pin Output Level */
     HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET);
 
     /*Configure GPIO pin Output Level */
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13
-                      |GPIO_PIN_14, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10|GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2
+                      |GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6
+                      |GPIO_PIN_7, GPIO_PIN_RESET);
 
-    /*Configure GPIO pin Output Level */
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
-                      |GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7, GPIO_PIN_RESET);
+    /*Configure GPIO pins : PE2 PE10 PE11 PE12
+                             PE14 PE0 PE1 */
+    GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12
+                          |GPIO_PIN_14|GPIO_PIN_0|GPIO_PIN_1;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
     /*Configure GPIO pin : PA3 */
     GPIO_InitStruct.Pin = GPIO_PIN_3;
@@ -458,13 +573,6 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    /*Configure GPIO pins : PE10 PE11 PE12 PE14 */
-    GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_14;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
     /*Configure GPIO pin : PE13 */
     GPIO_InitStruct.Pin = GPIO_PIN_13;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -472,69 +580,74 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
+    /*Configure GPIO pins : PD10 PD0 PD1 PD2
+                             PD3 PD4 PD5 PD6
+                             PD7 */
+    GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2
+                          |GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6
+                          |GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
     /*Configure GPIO pins : PC6 PC7 PC8 PC9 */
     GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    /*Configure GPIO pins : PD0 PD1 PD2 PD3
-                             PD4 PD5 PD6 PD7 */
-    GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
-                          |GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
     /* USER CODE BEGIN MX_GPIO_Init_2 */
     /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-float PID(void)
+double PID(double input)
 {
-    float output;
-	unsigned long now = HAL_GetTick();
-	  double delta_time = (now - prev_time) / 1000.0;
-	  prev_time = now;
+    double output_pid;
+    unsigned long now = HAL_GetTick();
+	
+    double delta_time = (now - prev_time) / 1000.0;
+	if (delta_time == 0) {
+		// Handle the case when delta_time is zero, for example, by setting it to a small value
+		delta_time = 0.001;  // or any other small value that makes sense in your application
+	}
+    prev_time = now;
 
-	  double error = setpoint - input;
+    error = setpoint - input;
 
-	  //PERHITUNGAN
-	  Derr = (error - Lerr) / delta_time;
-	  Ierr += (error * delta_time);
-	  Lerr = error;  // Simpan error saat ini untuk  iterasi berikutnya
+    // Error
+    Derr = (error - Lerr) / delta_time;
+    Ierr += (error * delta_time);
+    Lerr = error;  // Simpan error saat ini untuk  iterasi berikutnya
 
-	  output = (KP * error) + (KI * Ierr) + (KD * Derr);
-	  Serial.print("\nerror:");
-	  Serial.print(error);
-	  Serial.print(",");
+    // Anti-windup
+    if(Ierr > 500) Ierr=500;
 
-	  Serial.print("Ierr:");
-	  Serial.print(Ierr);
-	  Serial.print(",");
+    output_pid = (KP_now * error) + (KI_now * Ierr) + (KD_now * Derr);
 
-	  // Batasan output agar tidak melampaui rentang yang diinginkan
-	  if (output > maxDuty) {
-		output = maxDuty;
-	  } else if (output < 0.1) {
-		output = 0.1;
-	  }
-		return output;
+    // CLAMPING 0.1-0.55
+    if (output_pid > 0.55) {
+        output_pid = 0.55;
+    } else if (output_pid < 0.1) {
+        output_pid = 0.1;
+    }
+    return output_pid;
 }
 
-void reset_error(){
-	Lerr = 0.0;Derr = 0.0; Ierr = 0.0;
+void reset_error() {
+    Lerr = 0.0;
+    Derr = 0.0;
+    Ierr = 0.0;
 }
 
 void baca_sensor() {
-    current_ADC= getADCAvg(ADC_CHANNEL_2, 10, &hadc1);
-    current_A=(0.0139*current_ADC) -28.56-0.1;
+    current_ADC= getADCAvg(ADC_CHANNEL_2, 50, &hadc1);
+    current_A= adcToVolt(fabs(3603.0-current_ADC))/0.185;
 
-
-    voltage_ADC= getADCAvg(ADC_CHANNEL_0, 10, &hadc1);
-    voltage_V= (0.0081*voltage_ADC) -0.0175 ;
+    voltage_ADC= getADCAvg(ADC_CHANNEL_0, 50, &hadc1);
+    //voltage_V= (0.0081*voltage_ADC) -0.0175 ;
+    voltage_V=(0.008187*voltage_ADC) + 0.0004849;
 }
 
 float getADCAvg(uint32_t channel, int sample, ADC_HandleTypeDef* hadc)
@@ -551,21 +664,67 @@ float getADCAvg(uint32_t channel, int sample, ADC_HandleTypeDef* hadc)
     {
         Error_Handler();
     }
-    //HAL_ADCE_Calibration_Start(hadc);
+    HAL_Delay(75);
+    //HAL_ADCEx_Calibration_Start(hadc);
 
     //SAMPLING ADC
     float adcVal = 0;
+    HAL_ADC_Start(hadc);
+    HAL_ADC_PollForConversion(hadc, 100);
+    HAL_ADC_Start(hadc);
+    HAL_ADC_PollForConversion(hadc, 100);
+    HAL_ADC_Start(hadc);
+    HAL_ADC_PollForConversion(hadc, 100);
+	
     for (int i = 0; i < sample; i++)
     {
         HAL_ADC_Start(hadc);
         HAL_ADC_PollForConversion(hadc, 100);
         adcVal += HAL_ADC_GetValue(hadc);
     }
+    HAL_ADC_Stop(hadc);
     adcVal /= sample;
     return adcVal;
 }
 void print_lcd() {
+    if(HAL_GetTick() - prev_lcd_time > 500) {
+        lcd_clear();
+        //baris 1
+        lcd_send_cmd(0x80 | 0x00); //  lcd_setCursor(0,0);
+        len = snprintf((char *)buffer, 50, "Teg:%.2f/%.2f", voltage_V, voltage_ADC);
+        lcd_send_string((char *)buffer);
 
+        //baris 2
+        lcd_send_cmd(0x80 | 0x40); //  lcd_setCursor(0,1)
+        len = snprintf((char *)buffer, 50, "Arus:%.2f/%.2f", current_A, current_ADC);
+        lcd_send_string((char *)buffer);
+
+        float daya = current_A*voltage_V;
+        //baris 3
+        lcd_send_cmd(0x80 | 0x14); //	lcd_setCursor(0,2);
+        len = snprintf((char *)buffer, 50, "Daya:%.2f", daya);
+        lcd_send_string((char *)buffer);
+
+        lcd_send_cmd(0x80 | 0x54); //	lcd_setCursor(0,3);
+        len = snprintf((char *)buffer, 50, "%d -- %d pwm:%.2f", accu_class, charge_mode, pwmval);
+        lcd_send_string((char *)buffer);
+		
+        prev_lcd_time = HAL_GetTick();
+    }
+}
+
+void drive_sepic(float percent) {
+    float maxPWM=2100;
+    TIM4->CCR1= maxPWM-(maxPWM * percent);
+	//TIM4->CCR1= (maxPWM * percent);
+}
+void data_logger() {
+    int len = snprintf((char*)buffer, 100,"");
+    HAL_UART_Transmit(&huart3, (uint8_t*)buffer, len, 100);
+
+}
+float adcToVolt(float adc) {
+    return (adc/4095.0)*3.0;
 }
 /* USER CODE END 4 */
 
